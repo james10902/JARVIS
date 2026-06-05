@@ -98,7 +98,13 @@ def main() -> None:
             # Nothing heard — keep listening
             continue
 
-        user_input_clean = user_input.strip().lower()
+        # Guard against single-word noise transcriptions (common with ambient mic pickup)
+        user_input_stripped = user_input.strip()
+        if len(user_input_stripped.split()) < 2 and user_input_stripped.lower() not in _WAKE_PHRASES:
+            print(f"[Ignored noise: '{user_input_stripped}']")
+            continue
+
+        user_input_clean = user_input_stripped.lower()
 
         # --- Exit commands ---
         if user_input_clean in {"exit", "quit", "shut down", "goodbye jarvis"}:

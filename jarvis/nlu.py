@@ -13,7 +13,6 @@ import json
 from typing import Callable, List, Optional
 
 from jarvis.models import ConversationContext, Intent
-from jarvis.creator_profile import get_creator_context_block
 
 # ---------------------------------------------------------------------------
 # Prompt template (Requirement 10.3 — prevent LLM instruction override)
@@ -43,12 +42,17 @@ Rules:
 
 
 def _build_messages(input_str: str, ctx: ConversationContext) -> list[dict]:
-    """Build the LLM messages list with creator context, conversation history, and input."""
-    # Prepend the creator profile to the NLU system prompt
-    system_content = _SYSTEM_PROMPT + f"\n\n{get_creator_context_block()}"
-    messages: list[dict] = [{"role": "system", "content": system_content}]
+    """Build the LLM messages list for intent classification.
 
-    for turn in ctx.turns:
+    The creator profile is NOT included here — the NLU prompt must stay
+    short and JSON-focused. The profile belongs in the LLM response engine
+    where JARVIS crafts full conversational replies, not in the classifier.
+    """
+    messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+
+    # Only inject the last 4 turns for disambiguation — keeps the prompt lean
+    recent_turns = ctx.turns[-4:] if ctx.turns else []
+    for turn in recent_turns:
         role = "user" if turn.role == "user" else "assistant"
         messages.append({"role": role, "content": turn.content})
 
@@ -150,13 +154,11 @@ def resolve_intent(
             confidence = 0.0
         confidence = max(0.0, min(1.0, confidence))
 
-    except Exception as _nlu_exc:  # noqa: BLE001 — LLM error or JSON parse failure
-        import os as _os
-        if _os.environ.get("JARVIS_DEBUG"):
-            import traceback as _tb
-            print(f"[NLU ERROR] {_nlu_exc}")
-            _tb.print_exc()
-        # Requirement 11.1 / design error scenario 5 — graceful fallback
+    except Exception as _nlu_exc:  # noqa: BLE001
+        # Always print NLU errors so problems are visible in the terminal
+        import traceback as _tb
+        print(f"[NLU ERROR] {type(_nlu_exc).__name__}: {_nlu_exc}")
+        _tb.print_exc()
         return Intent(
             tag="unknown",
             entities=[],

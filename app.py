@@ -187,6 +187,12 @@ def _listen_and_respond():
             _set_state('standby', 'STANDBY')
             return
 
+        # Guard against noise transcriptions (single words from ambient pickup)
+        if len(user_text.strip().split()) < 2 and user_text.strip().lower() not in _WAKE_PHRASES:
+            print(f"[Ignored noise: '{user_text.strip()}']")
+            _set_state('standby', 'STANDBY')
+            return
+
         socketio.emit('transcript', {'text': user_text})
 
         # Exit

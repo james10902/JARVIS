@@ -110,8 +110,8 @@ def _vad_loop():
 # ── Speech-to-text ────────────────────────────────────────────────────────────
 def listen(
     sample_rate: int = 16000,
-    silence_threshold: float = 0.010,
-    silence_duration: float = 0.45,   # was 0.8s — now 450ms for snappier cutoff
+    silence_threshold: float = 0.018,  # raised from 0.010 — filters ambient noise
+    silence_duration: float = 0.55,    # slightly longer to avoid cutting off speech
     max_duration: float = 12.0,
     on_partial: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:

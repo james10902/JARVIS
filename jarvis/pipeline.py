@@ -88,11 +88,18 @@ def process_input(
 
     # Step 2: Low-confidence check (Requirement 8.4)
     if intent.confidence < 0.5:
-        output = JarvisOutput(
-            response="Could you clarify what you'd like me to do?",
-            action=None,
-        )
-        # Persist the interaction before returning
+        # Distinguish between a genuine unclear request vs a silent NLU failure
+        if intent.tag == "unknown":
+            response_text = (
+                "I'm having trouble reaching my language processor right now, Sir. "
+                "Please try again in a moment."
+            )
+        else:
+            response_text = (
+                f"I'm not entirely sure what you mean, Sir. "
+                f"Could you rephrase that?"
+            )
+        output = JarvisOutput(response=response_text, action=None)
         ctx = _persist_interaction(input_str, output, ctx)
         return output, ctx
 

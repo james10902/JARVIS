@@ -213,43 +213,13 @@ def _listen_and_respond():
             _set_state('standby', 'STANDBY')
             return
 
-        # ── Speed optimisation: run pipeline + prefetch TTS in parallel ──
+        # ── Pipeline + parallel TTS prefetch ─────────────────────────────
         _set_state('thinking', 'THINKING')
 
         with _ctx_lock:
             output, _ctx = process_input(user_text, _ctx, _registry, config)
 
-        # Prefetch ElevenLabs audio while we emit the response to the UI
-        audio_array = [None]
-        audio_ready = threading.Event()
-
-        def _prefetch_audio():
-            try:
-                import os, numpy as np
-                from elevenlabs.client import ElevenLabs
-                key      = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-                voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "29vD33N1CtxCmqQRPOHJ").strip()
-                if not key or key == "your_elevenlabs_api_key_here":
-                    audio_ready.set()
-                    return
-                client    = ElevenLabs(api_key=key)
-                audio_gen = client.text_to_speech.convert(
-                    voice_id=voice_id,
-                    text=output.response,
-                    model_id="eleven_turbo_v2",
-                    output_format="pcm_22050",
-                )
-                raw = b"".join(audio_gen)
-                audio_array[0] = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-            except Exception:
-                pass
-            finally:
-                audio_ready.set()
-
-        fetch_thread = threading.Thread(target=_prefetch_audio, daemon=True)
-        fetch_thread.start()
-
-        # Emit response to UI immediately (don't wait for audio)
+        # Emit response to UI immediately
         _set_state('speaking', 'SPEAKING')
         socketio.emit('response', {
             'text':      output.response,
@@ -257,43 +227,8 @@ def _listen_and_respond():
             'user_text': user_text,
         })
 
-        # Wait for audio (should already be ready or nearly ready)
-        audio_ready.wait(timeout=8)
-
-        if audio_array[0] is not None:
-            # Play pre-fetched audio directly using blocking=True so we wait
-            # for completion properly — sd.get_stream() is unreliable when
-            # an input stream (VAD mic) is also open simultaneously
-            import sounddevice as sd
-            from jarvis.voice import _stop_playback, _is_speaking
-            _stop_playback.clear()
-            _is_speaking.set()
-            try:
-                sd.play(audio_array[0], samplerate=22050)
-                # Poll until done — sd.wait() blocks but honours stop_playback
-                while sd.get_stream().active:
-                    if _stop_playback.is_set():
-                        sd.stop()
-                        break
-                    sd.sleep(30)
-                else:
-                    sd.wait()
-            except Exception:
-                # sd.wait() or get_stream() failed — just wait on the array length
-                import time
-                duration = len(audio_array[0]) / 22050
-                deadline = time.time() + duration + 0.5
-                while time.time() < deadline:
-                    if _stop_playback.is_set():
-                        try: sd.stop()
-                        except: pass
-                        break
-                    time.sleep(0.05)
-            finally:
-                _is_speaking.clear()
-        else:
-            # Fallback
-            speak(output.response)
+        # Speak — routes through the dedicated audio thread queue
+        speak(output.response)
 
         _set_state('standby', 'STANDBY')
 

@@ -1,17 +1,20 @@
-"""Voice I/O for JARVIS — optimised for low latency.
+"""Voice I/O for JARVIS — robust audio engine.
 
-Key improvements over v1:
-- Silence detection cut to 450ms (was 800ms) → faster end-of-speech detection
-- Transcription runs in-memory via BytesIO (no temp file disk I/O)
-- Persistent Edge TTS asyncio loop (no per-call loop creation overhead)
-- Whisper base.en model (better accuracy than tiny, still fast on CPU)
-- Always-on VAD auto-interrupts JARVIS mid-speech when user speaks
+Architecture:
+- A single persistent AUDIO THREAD owns all sounddevice playback.
+  Flask/SocketIO worker threads just put audio onto a queue and wait.
+  This avoids the OutputStream callback failures that occur when audio
+  is started from non-main threads on Windows.
+- VAD runs in its own thread, monitors the mic, and calls stop_speaking()
+  which drains the queue and wakes the audio thread immediately.
+- Whisper base.en transcribes in-memory (no temp file).
 """
 
 from __future__ import annotations
 
 import io
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -21,7 +24,7 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
-# ── Pre-warm Whisper at import (eliminates first-use delay) ──────────────────
+# ── Whisper ───────────────────────────────────────────────────────────────────
 _whisper_model = None
 _whisper_lock  = threading.Lock()
 
@@ -31,59 +34,115 @@ def _get_whisper():
     with _whisper_lock:
         if _whisper_model is None:
             from faster_whisper import WhisperModel
-            # base.en: better accuracy than tiny, still fast on CPU with int8
             _whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
     return _whisper_model
 
 
 def prewarm():
-    """Call once at startup to load Whisper into memory."""
     _get_whisper()
 
 
-# ── Playback state ────────────────────────────────────────────────────────────
-_stop_playback   = threading.Event()
-_is_speaking     = threading.Event()   # set while JARVIS is playing audio
-_interrupt_cb: Optional[Callable] = None
+# ── Audio playback engine ─────────────────────────────────────────────────────
+# All playback goes through this queue → dedicated audio thread.
+# Entries: (np.ndarray, int samplerate) or the sentinel STOP_TOKEN.
+
+_STOP_TOKEN   = object()
+_audio_queue  : queue.Queue = queue.Queue()
+_play_done    = threading.Event()   # set when current item finishes
+_is_speaking  = threading.Event()   # set while audio is playing
+_stop_playback = threading.Event()  # set to interrupt current playback
+_interrupt_cb : Optional[Callable] = None
+
+
+def _audio_thread_main():
+    """Dedicated thread — the ONLY place sd.play/sd.wait is called."""
+    while True:
+        item = _audio_queue.get()
+        if item is _STOP_TOKEN:
+            _play_done.set()
+            continue
+
+        audio_arr, sr = item
+        _stop_playback.clear()
+        _is_speaking.set()
+        _play_done.clear()
+
+        try:
+            sd.play(audio_arr, samplerate=sr)
+            # Poll sd.wait in small steps so _stop_playback can interrupt
+            while True:
+                if _stop_playback.is_set():
+                    sd.stop()
+                    break
+                # sd.get_stream() is safe here — we are the only thread playing
+                try:
+                    if not sd.get_stream().active:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.03)
+            # Drain any leftover
+            try:
+                sd.stop()
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"[AUDIO ENGINE] playback error: {exc}")
+        finally:
+            _is_speaking.clear()
+            _play_done.set()
+            _audio_queue.task_done()
+
+
+# Start the audio thread once at import
+_audio_thread = threading.Thread(target=_audio_thread_main, daemon=True, name="jarvis-audio")
+_audio_thread.start()
+
+
+def _play_blocking(audio_arr: np.ndarray, samplerate: int) -> None:
+    """Queue audio and block the calling thread until it finishes (or is stopped)."""
+    _play_done.clear()
+    _audio_queue.put((audio_arr, samplerate))
+    _play_done.wait()
+
+
+def stop_speaking() -> None:
+    """Interrupt playback immediately."""
+    _stop_playback.set()
+    # Drain the queue
+    while not _audio_queue.empty():
+        try:
+            _audio_queue.get_nowait()
+            _audio_queue.task_done()
+        except queue.Empty:
+            break
+    # Wake the audio thread with a stop token so it clears state
+    _audio_queue.put(_STOP_TOKEN)
+    _is_speaking.clear()
 
 
 def set_interrupt_callback(cb: Callable):
-    """Register a callback that fires when the user speaks over JARVIS."""
     global _interrupt_cb
     _interrupt_cb = cb
 
 
-def stop_speaking():
-    """Stop playback immediately."""
-    _stop_playback.set()
-    _is_speaking.clear()
-    try:
-        sd.stop()
-    except Exception:
-        pass
-
-
-# ── Always-on VAD background thread ──────────────────────────────────────────
+# ── Always-on VAD ─────────────────────────────────────────────────────────────
 _VAD_THRESHOLD   = 0.015
 _VAD_HOLD_FRAMES = 3
-_vad_thread: Optional[threading.Thread] = None
-_vad_running = False
+_vad_running     = False
 
 
 def start_vad_monitor():
-    """Start the always-on background VAD monitor."""
-    global _vad_thread, _vad_running
+    global _vad_running
     if _vad_running:
         return
     _vad_running = True
-    _vad_thread = threading.Thread(target=_vad_loop, daemon=True)
-    _vad_thread.start()
+    threading.Thread(target=_vad_loop, daemon=True, name="jarvis-vad").start()
 
 
 def _vad_loop():
-    """Continuously monitor mic. Voice during speech → auto-interrupt."""
     loud_count = 0
-    BLOCK = 1600  # 100ms at 16 kHz
+    BLOCK = 1600  # 100ms at 16kHz
 
     def _cb(indata, frames, time_info, status):
         nonlocal loud_count
@@ -110,12 +169,11 @@ def _vad_loop():
 # ── Speech-to-text ────────────────────────────────────────────────────────────
 def listen(
     sample_rate: int = 16000,
-    silence_threshold: float = 0.018,  # raised from 0.010 — filters ambient noise
-    silence_duration: float = 0.55,    # slightly longer to avoid cutting off speech
+    silence_threshold: float = 0.018,
+    silence_duration: float = 0.55,
     max_duration: float = 12.0,
     on_partial: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
-    """Record until silence, transcribe with Whisper base.en."""
     frames: list[np.ndarray] = []
     silent_frames    = 0
     speaking_started = False
@@ -164,38 +222,29 @@ def _emit_partial(frames, sample_rate, on_partial):
 
 
 def _transcribe(audio: np.ndarray, sample_rate: int) -> Optional[str]:
-    """Transcribe in-memory via BytesIO — no temp file, no disk I/O."""
     try:
         buf = io.BytesIO()
         sf.write(buf, audio, sample_rate, format="WAV")
         buf.seek(0)
         model = _get_whisper()
         segments, _ = model.transcribe(
-            buf,
-            language="en",
-            beam_size=1,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 200},
+            buf, language="en", beam_size=1,
+            vad_filter=True, vad_parameters={"min_silence_duration_ms": 200},
         )
         return " ".join(s.text.strip() for s in segments).strip() or None
     except Exception:
-        # faster-whisper may not support BytesIO on all builds — fall back to temp file
         return _transcribe_file(audio, sample_rate)
 
 
 def _transcribe_file(audio: np.ndarray, sample_rate: int) -> Optional[str]:
-    """Fallback: temp-file transcription."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
         sf.write(tmp_path, audio, sample_rate)
     try:
         model = _get_whisper()
         segments, _ = model.transcribe(
-            tmp_path,
-            language="en",
-            beam_size=1,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 200},
+            tmp_path, language="en", beam_size=1,
+            vad_filter=True, vad_parameters={"min_silence_duration_ms": 200},
         )
         return " ".join(s.text.strip() for s in segments).strip() or None
     finally:
@@ -204,8 +253,8 @@ def _transcribe_file(audio: np.ndarray, sample_rate: int) -> Optional[str]:
 
 # ── Text-to-speech ────────────────────────────────────────────────────────────
 
-# Persistent Edge TTS event loop — reused across calls to avoid ~50ms setup overhead
-_edge_tts_loop: Optional[object] = None
+# Persistent Edge TTS event loop
+_edge_tts_loop : Optional[object] = None
 _edge_tts_lock = threading.Lock()
 
 
@@ -219,28 +268,21 @@ def _get_edge_loop():
 
 
 def speak(text: str) -> None:
-    """Speak text. Marks _is_speaking so VAD can auto-interrupt."""
-    _stop_playback.clear()
-    _is_speaking.set()
-
+    """Convert text to audio and play it through the audio engine."""
     api_key  = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "29vD33N1CtxCmqQRPOHJ").strip()
 
-    try:
-        if api_key and api_key != "your_elevenlabs_api_key_here":
-            try:
-                _speak_elevenlabs(text, api_key, voice_id)
-                return
-            except Exception as e:
-                print(f"[ElevenLabs unavailable: {type(e).__name__}. Using fallback TTS.]")
-        _speak_fallback(text)
-    finally:
-        _is_speaking.clear()
+    if api_key and api_key != "your_elevenlabs_api_key_here":
+        try:
+            _speak_elevenlabs(text, api_key, voice_id)
+            return
+        except Exception as e:
+            print(f"[ElevenLabs error: {type(e).__name__}: {e}] — falling back to Edge TTS")
+    _speak_fallback(text)
 
 
 def _speak_elevenlabs(text: str, api_key: str, voice_id: str) -> None:
     from elevenlabs.client import ElevenLabs
-
     client    = ElevenLabs(api_key=api_key)
     audio_gen = client.text_to_speech.convert(
         voice_id=voice_id,
@@ -249,28 +291,16 @@ def _speak_elevenlabs(text: str, api_key: str, voice_id: str) -> None:
         output_format="pcm_22050",
     )
     audio_bytes = b"".join(audio_gen)
-
-    if _stop_playback.is_set():
-        return
-
-    audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-    # Use time-based wait — sd.get_stream() can return the VAD input stream
-    # instead of the output stream when both are open, causing early exit
-    sd.play(audio_array, samplerate=22050)
-    duration = len(audio_array) / 22050
-    import time
-    deadline = time.time() + duration + 0.5
-    while time.time() < deadline:
-        if _stop_playback.is_set():
-            sd.stop()
-            return
-        time.sleep(0.03)
+    if not audio_bytes:
+        raise RuntimeError("ElevenLabs returned empty audio")
+    audio_arr = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    print(f"[TTS] ElevenLabs: {len(audio_arr)} samples @ 22050Hz")
+    _play_blocking(audio_arr, 22050)
 
 
 def _speak_fallback(text: str) -> None:
-    """Edge TTS (neural, free) with reused event loop. Falls back to pyttsx3."""
     try:
+        import asyncio
         import edge_tts
         voice = os.environ.get("EDGE_TTS_VOICE", "en-GB-RyanNeural")
 
@@ -283,28 +313,12 @@ def _speak_fallback(text: str) -> None:
 
         loop     = _get_edge_loop()
         tmp_path = loop.run_until_complete(_generate())
-
-        if _stop_playback.is_set():
-            os.unlink(tmp_path)
-            return
-
-        data, samplerate = sf.read(tmp_path)
+        data, sr = sf.read(tmp_path)
         os.unlink(tmp_path)
-
         if data.ndim > 1:
             data = data[:, 0]
-
-        audio_array = data.astype(np.float32)
-        sd.play(audio_array, samplerate=samplerate)
-        import time
-        duration = len(audio_array) / samplerate
-        deadline = time.time() + duration + 0.5
-        while time.time() < deadline:
-            if _stop_playback.is_set():
-                sd.stop()
-                return
-            time.sleep(0.03)
-
+        print(f"[TTS] Edge TTS: {len(data)} samples @ {sr}Hz")
+        _play_blocking(data.astype(np.float32), sr)
     except Exception as exc:
         print(f"[Edge TTS failed: {exc}] — using pyttsx3")
         _speak_pyttsx3(text)

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#020818" />
+  <title>JARVIS</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+  <!-- Particle field background -->
+  <canvas id="particles"></canvas>
+
+  <!-- Main UI -->
+  <div class="ui-wrapper">
+
+    <!-- Top status bar -->
+    <div class="status-bar">
+      <div class="status-dot" id="statusDot"></div>
+      <span class="status-text" id="statusText">STANDBY</span>
+      <div class="time-display" id="timeDisplay"></div>
+    </div>
+
+    <!-- JARVIS logo / title -->
+    <div class="logo-area">
+      <div class="logo-ring">
+        <div class="logo-inner">J</div>
+      </div>
+      <h1 class="logo-title">J.A.R.V.I.S</h1>
+      <p class="logo-sub">Just A Rather Very Intelligent System</p>
+    </div>
+
+    <!-- Transcript display -->
+    <div class="transcript-area">
+      <p class="transcript-label" id="transcriptLabel">Awaiting your command, Sir.</p>
+      <p class="transcript-response" id="transcriptResponse"></p>
+    </div>
+
+    <!-- Waveform visualiser -->
+    <div class="wave-container">
+      <canvas id="waveCanvas"></canvas>
+    </div>
+
+    <!-- Control buttons -->
+    <div class="controls">
+      <button class="btn-mic" id="micBtn" title="Tap to speak">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+      </button>
+      <!-- Mobile stop button — only shown on mobile while recording -->
+      <button class="btn-stop" id="stopBtn" title="Send" style="display:none">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="4" y="4" width="16" height="16" rx="2"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Mobile mode indicator -->
+    <div class="mobile-hint" id="mobileHint" style="display:none">
+      <span>📱 Mobile mode — tap mic, speak, tap stop to send</span>
+    </div>
+
+    <!-- Conversation history -->
+    <div class="history-panel" id="historyPanel">
+      <div class="history-title">CONVERSATION LOG</div>
+      <div class="history-list" id="historyList"></div>
+    </div>
+
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

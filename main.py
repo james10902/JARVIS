@@ -33,15 +33,14 @@ from jarvis.voice import listen, speak
 # ---------------------------------------------------------------------------
 
 _WAKE_PHRASES = {
-    "jarvis",
-    "hey jarvis",
-    "hello jarvis",
-    "wake up",
-    "wake up daddy is home",
-    "daddy is home",
-    "wake up jarvis",
-    "yo jarvis",
-    "jarvis wake up",
+    # Standard
+    "jarvis", "hey jarvis", "hello jarvis", "wake up",
+    "wake up jarvis", "yo jarvis", "jarvis wake up",
+    "wake up daddy is home", "daddy is home",
+    # Common Whisper mishearings
+    "travis", "hey travis", "javas", "hey javas",
+    "jarvis wake", "jarvis please", "ok jarvis",
+    "davis", "hey davis", "java", "java's",
 }
 
 

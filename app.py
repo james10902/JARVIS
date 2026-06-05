@@ -48,9 +48,14 @@ _current_state = "standby"
 _listen_lock   = threading.Lock()   # prevent overlapping listen sessions
 
 _WAKE_PHRASES = {
+    # Standard
     "jarvis", "hey jarvis", "hello jarvis", "wake up",
-    "wake up daddy is home", "daddy is home", "wake up jarvis",
-    "yo jarvis", "jarvis wake up",
+    "wake up jarvis", "yo jarvis", "jarvis wake up",
+    "wake up daddy is home", "daddy is home",
+    # Common Whisper mishearings
+    "travis", "hey travis", "javas", "hey javas",
+    "jarvis wake", "jarvis please", "ok jarvis",
+    "davis", "hey davis", "java", "java's",
 }
 
 def _time_greeting() -> str:

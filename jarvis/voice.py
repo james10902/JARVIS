@@ -69,19 +69,19 @@ def _audio_thread_main():
 
         try:
             sd.play(audio_arr, samplerate=sr)
-            # Poll sd.wait in small steps so _stop_playback can interrupt
+            # Wait 600ms before honouring VAD interrupts — prevents speaker
+            # bleedthrough from immediately stopping playback
+            time.sleep(0.6)
             while True:
                 if _stop_playback.is_set():
                     sd.stop()
                     break
-                # sd.get_stream() is safe here — we are the only thread playing
                 try:
                     if not sd.get_stream().active:
                         break
                 except Exception:
                     break
                 time.sleep(0.03)
-            # Drain any leftover
             try:
                 sd.stop()
             except Exception:
@@ -127,8 +127,8 @@ def set_interrupt_callback(cb: Callable):
 
 
 # ── Always-on VAD ─────────────────────────────────────────────────────────────
-_VAD_THRESHOLD   = 0.015
-_VAD_HOLD_FRAMES = 3
+_VAD_THRESHOLD   = 0.045  # high enough to ignore speaker bleedthrough, low enough for voice
+_VAD_HOLD_FRAMES = 5      # require 5 consecutive loud frames (~500ms) before interrupting
 _vad_running     = False
 
 

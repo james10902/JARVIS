@@ -57,7 +57,7 @@ def chat(messages: list[dict], model: str | None = None) -> str:
     Raises:
         Exception: If all keys are exhausted or a non-quota error occurs.
     """
-    from groq import Groq, RateLimitError
+    from groq import Groq, RateLimitError, AuthenticationError
 
     keys = _get_keys()
     use_model = model or _MODEL
@@ -76,10 +76,20 @@ def chat(messages: list[dict], model: str | None = None) -> str:
             # Quota exhausted on this key — try the next one
             last_exc = exc
             continue
+        except AuthenticationError as exc:
+            # Invalid key — skip it and try the next, but warn clearly
+            print(f"[GROQ] Invalid API key (skipping): {exc}")
+            last_exc = exc
+            continue
         except Exception:
-            # Non-quota error (auth failure, network, etc.) — re-raise immediately
             raise
 
+    # All keys failed — give a clear actionable message
+    if last_exc and "invalid_api_key" in str(last_exc).lower():
+        raise RuntimeError(
+            "All Groq API keys are invalid or expired. "
+            "Generate new keys at https://console.groq.com and update your .env file."
+        )
     raise RuntimeError(
         f"All Groq API keys exhausted. Last error: {last_exc}"
     )

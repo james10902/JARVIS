@@ -128,6 +128,15 @@ def main() -> None:
             print(f"JARVIS: {msg}\n")
             speak(msg)
             continue
+        except RuntimeError as exc:
+            msg = str(exc)
+            print(f"\n[FATAL] {msg}\n")
+            # If it's a key error, no point continuing — exit cleanly
+            if "invalid" in msg.lower() or "api key" in msg.lower() or "exhausted" in msg.lower():
+                speak("My API keys are invalid, Sir. Please update the dot env file with new Groq keys and restart.")
+                break
+            speak("I encountered an unexpected error. Please try again.")
+            continue
         except Exception as exc:  # noqa: BLE001
             import traceback
             traceback.print_exc()

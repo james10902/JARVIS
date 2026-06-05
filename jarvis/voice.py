@@ -255,12 +255,17 @@ def _speak_elevenlabs(text: str, api_key: str, voice_id: str) -> None:
 
     audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-    sd.play(audio_array, samplerate=22050, blocking=False)
-    while sd.get_stream().active:
+    # Use time-based wait — sd.get_stream() can return the VAD input stream
+    # instead of the output stream when both are open, causing early exit
+    sd.play(audio_array, samplerate=22050)
+    duration = len(audio_array) / 22050
+    import time
+    deadline = time.time() + duration + 0.5
+    while time.time() < deadline:
         if _stop_playback.is_set():
             sd.stop()
             return
-        sd.sleep(50)
+        time.sleep(0.03)
 
 
 def _speak_fallback(text: str) -> None:
@@ -289,12 +294,16 @@ def _speak_fallback(text: str) -> None:
         if data.ndim > 1:
             data = data[:, 0]
 
-        sd.play(data.astype(np.float32), samplerate=samplerate, blocking=False)
-        while sd.get_stream().active:
+        audio_array = data.astype(np.float32)
+        sd.play(audio_array, samplerate=samplerate)
+        import time
+        duration = len(audio_array) / samplerate
+        deadline = time.time() + duration + 0.5
+        while time.time() < deadline:
             if _stop_playback.is_set():
                 sd.stop()
                 return
-            sd.sleep(50)
+            time.sleep(0.03)
 
     except Exception as exc:
         print(f"[Edge TTS failed: {exc}] — using pyttsx3")

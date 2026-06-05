@@ -20,8 +20,8 @@ from jarvis.creator_profile import get_creator_context_block
 # Retry configuration (Requirement 11.1)
 # ---------------------------------------------------------------------------
 
-_MAX_RETRIES = 3
-_BACKOFF_DELAYS = [1, 2, 4]  # seconds: 1s, 2s, 4s
+_MAX_RETRIES = 2
+_BACKOFF_DELAYS = [0.5, 1.0]  # short backoffs — don't make the user wait
 
 _FALLBACK_RESPONSE = LLMResponse(
     text="I'm having trouble processing that right now. Could you try again?",
@@ -110,12 +110,11 @@ def _build_messages(
         {"role": "system", "content": _build_system_prompt(config)}
     ]
 
-    # Inject recent conversation turns for context-aware responses.
-    for turn in ctx.turns:
+    # Send only the last 6 turns — enough for context, keeps tokens low and API fast
+    for turn in ctx.turns[-6:]:
         role = "user" if turn.role == "user" else "assistant"
         messages.append({"role": role, "content": turn.content})
 
-    # The current user query is the raw input from the intent.
     messages.append({"role": "user", "content": intent.raw_input})
     return messages
 

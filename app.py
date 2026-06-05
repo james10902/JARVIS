@@ -261,18 +261,34 @@ def _listen_and_respond():
         audio_ready.wait(timeout=8)
 
         if audio_array[0] is not None:
-            # Play pre-fetched audio directly
+            # Play pre-fetched audio directly using blocking=True so we wait
+            # for completion properly — sd.get_stream() is unreliable when
+            # an input stream (VAD mic) is also open simultaneously
             import sounddevice as sd
             from jarvis.voice import _stop_playback, _is_speaking
             _stop_playback.clear()
             _is_speaking.set()
             try:
-                sd.play(audio_array[0], samplerate=22050, blocking=False)
+                sd.play(audio_array[0], samplerate=22050)
+                # Poll until done — sd.wait() blocks but honours stop_playback
                 while sd.get_stream().active:
                     if _stop_playback.is_set():
                         sd.stop()
                         break
-                    sd.sleep(50)
+                    sd.sleep(30)
+                else:
+                    sd.wait()
+            except Exception:
+                # sd.wait() or get_stream() failed — just wait on the array length
+                import time
+                duration = len(audio_array[0]) / 22050
+                deadline = time.time() + duration + 0.5
+                while time.time() < deadline:
+                    if _stop_playback.is_set():
+                        try: sd.stop()
+                        except: pass
+                        break
+                    time.sleep(0.05)
             finally:
                 _is_speaking.clear()
         else:
